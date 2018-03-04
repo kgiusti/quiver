@@ -114,25 +114,26 @@ public class QuiverArrowVertxProton {
                 if (res.succeeded()) {
                     ProtonConnection connection = res.result();
                     connection.setContainer(id);
+                    connection.closeHandler(x -> {
+                            completionLatch.countDown();
+                        });
+
+                    if (seconds > 0) {
+                        vertx.setTimer(seconds * 1000, timerId -> {
+                                stopping.lazySet(true);
+                            });
+                    }
 
                     if (sender) {
-                        send(connection, path, messages, bodySize, durable,
-                             stopping, completionLatch);
+                        send(connection, path, messages, bodySize, durable, stopping);
                     } else {
-                        receive(connection, path, messages, creditWindow,
-                                stopping, completionLatch);
+                        receive(connection, path, messages, creditWindow, stopping);
                     }
                 } else {
                     res.cause().printStackTrace();
                     completionLatch.countDown();
                 }
             });
-
-        if (seconds > 0) {
-            vertx.setTimer(seconds * 1000, timerId -> {
-                    stopping.lazySet(true);
-                });
-        }
 
         // Await the operations completing, then shut down the Vertx
         // instance.
@@ -149,7 +150,7 @@ public class QuiverArrowVertxProton {
 
     private static void send(ProtonConnection connection, String address,
                              int messages, int bodySize, boolean durable,
-                             AtomicBoolean stopping, CountDownLatch latch) {
+                             AtomicBoolean stopping) {
         connection.open();
 
         final StringBuilder line = new StringBuilder();
@@ -187,7 +188,8 @@ public class QuiverArrowVertxProton {
                     long cnt = count.getAndIncrement();
 
                     if (cnt >= messages || stopping.get()) {
-                        stop(connection, latch, out);
+                        out.flush();
+                        connection.close();
                     }
                 }
             });
@@ -196,7 +198,7 @@ public class QuiverArrowVertxProton {
 
     private static void receive(ProtonConnection connection, String address,
                                 int messages, int creditWindow,
-                                AtomicBoolean stopping, CountDownLatch latch) {
+                                AtomicBoolean stopping) {
         connection.open();
 
         final StringBuilder line = new StringBuilder();
@@ -218,17 +220,9 @@ public class QuiverArrowVertxProton {
                 receiver.flow(1);
 
                 if (count.getAndIncrement() >= messages || stopping.get()) {
-                    stop(connection, latch, out);
+                    out.flush();
+                    connection.close();
                 }
             }).open();
-    }
-
-    private static void stop(ProtonConnection connection, CountDownLatch latch, PrintWriter out) {
-        out.flush();
-
-        connection.closeHandler(x -> {
-                latch.countDown();
-            });
-        connection.close();
     }
 }
