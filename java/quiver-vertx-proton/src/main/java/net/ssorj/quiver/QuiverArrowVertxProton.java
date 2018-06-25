@@ -22,8 +22,8 @@
 package net.ssorj.quiver;
 
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -140,17 +140,15 @@ public class QuiverArrowVertxProton {
         vertx.close();
     }
 
-    // TODO: adjust? The writer is [needlessly] synchronizing every
-    // write, the buffer may flush more/less often than desired?.
-    private static PrintWriter getOutputWriter() {
-        return new PrintWriter(System.out);
+    private static BufferedWriter getWriter() {
+        return new BufferedWriter(new OutputStreamWriter(System.out));
     }
 
     private static void send(final ProtonConnection connection, final String address,
                              final int messages, final int bodySize, final boolean durable,
                              final AtomicBoolean stopping) {
         final StringBuilder line = new StringBuilder();
-        final PrintWriter out = getOutputWriter();
+        final BufferedWriter out = getWriter();
         final AtomicLong count = new AtomicLong(1);
         final ProtonSender sender = connection.createSender(address);
         final byte[] body = new byte[bodySize];
@@ -158,31 +156,35 @@ public class QuiverArrowVertxProton {
         Arrays.fill(body, (byte) 120);
 
         sender.sendQueueDrainHandler(s -> {
-                while (!sender.sendQueueFull()) {
-                    final Message msg = Message.Factory.create();
-                    final String id = String.valueOf(count.get());
-                    final long stime = System.currentTimeMillis();
-                    final Map<String, Object> props = new HashMap<>();
+                try {
+                    while (!sender.sendQueueFull()) {
+                        final Message msg = Message.Factory.create();
+                        final String id = String.valueOf(count.get());
+                        final long stime = System.currentTimeMillis();
+                        final Map<String, Object> props = new HashMap<>();
 
-                    props.put("SendTime", stime);
-                    
-                    msg.setMessageId(id);
-                    msg.setBody(new Data(new Binary(body)));
-                    msg.setApplicationProperties(new ApplicationProperties(props));
+                        props.put("SendTime", stime);
 
-                    if (durable) {
-                        msg.setDurable(true);
+                        msg.setMessageId(id);
+                        msg.setBody(new Data(new Binary(body)));
+                        msg.setApplicationProperties(new ApplicationProperties(props));
+
+                        if (durable) {
+                            msg.setDurable(true);
+                        }
+
+                        sender.send(msg);
+
+                        line.setLength(0);
+                        out.append(line.append(id).append(',').append(stime).append('\n'));
+
+                        if (count.getAndIncrement() >= messages || stopping.get()) {
+                            out.flush();
+                            connection.close();
+                        }
                     }
-
-                    sender.send(msg);
-
-                    line.setLength(0);
-                    out.append(line.append(id).append(',').append(stime).append('\n'));
-
-                    if (count.getAndIncrement() >= messages || stopping.get()) {
-                        out.flush();
-                        connection.close();
-                    }
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
                 }
             });
 
@@ -194,25 +196,29 @@ public class QuiverArrowVertxProton {
                                 final int messages, final int creditWindow,
                                 final AtomicBoolean stopping) {
         final StringBuilder line = new StringBuilder();
-        final PrintWriter out = getOutputWriter();
+        final BufferedWriter out = getWriter();
         final AtomicInteger count = new AtomicInteger(1);
         final ProtonReceiver receiver = connection.createReceiver(address);
 
         receiver.setAutoAccept(false).setPrefetch(0).flow(creditWindow);
         receiver.handler((delivery, msg) -> {
-                final Object id = msg.getMessageId();
-                final long stime = (Long) msg.getApplicationProperties().getValue().get("SendTime");
-                final long rtime = System.currentTimeMillis();
+                try {
+                    final Object id = msg.getMessageId();
+                    final long stime = (Long) msg.getApplicationProperties().getValue().get("SendTime");
+                    final long rtime = System.currentTimeMillis();
 
-                line.setLength(0);
-                out.append(line.append(id).append(',').append(stime).append(',').append(rtime).append('\n'));
+                    line.setLength(0);
+                    out.append(line.append(id).append(',').append(stime).append(',').append(rtime).append('\n'));
 
-                delivery.disposition(ACCEPTED, true);
-                receiver.flow(1);
+                    delivery.disposition(ACCEPTED, true);
+                    receiver.flow(1);
 
-                if (count.getAndIncrement() >= messages || stopping.get()) {
-                    out.flush();
-                    connection.close();
+                    if (count.getAndIncrement() >= messages || stopping.get()) {
+                        out.flush();
+                        connection.close();
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
                 }
             });
 
